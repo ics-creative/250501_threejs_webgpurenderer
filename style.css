@@ -1,0 +1,17 @@
+body {
+  margin: 0;
+  overflow: hidden;
+}
+
+#info {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 10px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.5);
+  font-family: sans-serif;
+  z-index: 100;
+  white-space: pre-wrap; /* 改行を有効にする */
+  line-height: 1.4; /* 行間を少し調整 */
+} 

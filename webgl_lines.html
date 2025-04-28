@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>Three.js 自動ベンチマーク (Lines - WebGL)</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!-- 情報表示を一つの div にまとめる -->
+<div id="info">
+  <span id="status-info">Benchmarking...</span><br>
+  <span id="gpu-info-span"></span><br> <!-- GPU情報用 -->
+  <span id="drawcall-info-span"></span> <!-- ドローコール用 -->
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/stats.js/7/Stats.min.js"></script>
+<script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.175.0/build/three.module.js"
+    }
+  }
+</script>
+<script type="module">
+  import * as THREE from "three";
+  import { setupSceneCameraStats, setupResizeHandler, runBenchmark } from './benchmark_utils.js';
+
+  // --- 共通セットアップ ---
+  const { scene, camera, stats } = setupSceneCameraStats();
+
+  // --- WebGL 固有セットアップ ---
+  const renderer = new THREE.WebGLRenderer({antialias: true});
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  // GPU 情報ログ (WebGL用)
+  (() => {
+    const gl = renderer.getContext();
+    const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+    const gpuInfoElement = document.getElementById('gpu-info-span');
+    if (dbg && gpuInfoElement) {
+      gpuInfoElement.textContent =
+        `GPU: ${gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL)}, ` +
+        `${gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)}`;
+    } else if (gpuInfoElement) {
+      gpuInfoElement.textContent = 'GPU info not available';
+    }
+  })();
+
+  // リサイズハンドラ設定
+  setupResizeHandler(camera, renderer);
+
+  // --- ベンチマーク固有ロジック (Line版) ---
+  let lines = [];
+
+  /**
+   * 指定された数の Line インスタンスを生成し、シーンに追加します。
+   * 既存の Line は事前にシーンから削除されます。
+   * 各 Line はランダムな2点間に引かれます。
+   * @param {number} n - 生成する Line の数。
+   */
+  function createLines(n) {
+    // 既存をクリア
+    lines.forEach(line => scene.remove(line));
+    lines = [];
+    // マテリアルを再利用
+    const mat = new THREE.LineBasicMaterial({ color: 0xffffff }); // 白色
+
+    for (let i = 0; i < n; i++) {
+      const points = [];
+      // ランダムな2点を生成
+      points.push(new THREE.Vector3((Math.random() - 0.5) * 100, (Math.random() - 0.5) * 100, (Math.random() - 0.5) * 100));
+      points.push(new THREE.Vector3((Math.random() - 0.5) * 100, (Math.random() - 0.5) * 100, (Math.random() - 0.5) * 100));
+
+      const geometry = new THREE.BufferGeometry().setFromPoints(points);
+      const line = new THREE.Line(geometry, mat);
+      scene.add(line);
+      lines.push(line);
+    }
+    // 初回描画時にジオメトリ情報をGPUに転送するため、一度レンダリングを実行することが推奨される場合がある
+    renderer.render(scene, camera);
+  }
+
+  /**
+   * 指定されたフレーム数をレンダリングし、その間の平均 FPS を測定して返します。
+   * Line にはアニメーションがないため、レンダリングのみ実行します。
+   * @param {number} n - FPS 測定のためにレンダリングするフレーム数。
+   * @returns {Promise<number>} 測定された平均 FPS を解決する Promise。
+   */
+  async function measureFPS(n) {
+    const drawCallElement = document.getElementById('drawcall-info-span');
+    return new Promise(resolve => {
+      let count = 0, t0 = 0, total = 0;
+
+      function step() {
+        if (count === 0) t0 = performance.now();
+
+        // アニメーションは不要
+
+        renderer.render(scene, camera);
+
+        // ドローコール数を表示
+        if (drawCallElement) {
+           drawCallElement.textContent = `Draw Calls: ${renderer.info.render.calls !== undefined ? renderer.info.render.calls : 'N/A'}`;
+        }
+
+        stats.update(); // stats は共通セットアップで取得
+        const dt = performance.now() - (t0 + total);
+        total += dt;
+        count++;
+        if (count < n) {
+          requestAnimationFrame(step);
+        } else {
+          const avgFPS = 1000 / (total / n);
+          resolve(avgFPS);
+        }
+      }
+
+      step();
+    });
+  }
+
+  // --- ベンチマーク実行 ---
+  runBenchmark({
+    createCubesFn: createLines, // 関数名を変更
+    measureFPSFn: measureFPS,
+    renderer: renderer,
+    resultLabel: "(WebGL - Lines)", // ラベルを変更
+    maxTest: 50000 // Line は Cube より軽量な傾向があるため、上限を上げる (要調整)
+  });
+</script>
+</body>
+</html>

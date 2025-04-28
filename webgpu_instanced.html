@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>Three.js 自動ベンチマーク (WebGPU - Instanced)</title> <!-- タイトル変更 -->
+  <link rel="stylesheet" href="style.css"> <!-- 外部CSSを読み込む -->
+</head>
+<body>
+<!-- 情報表示を一つの div にまとめる -->
+<div id="info">
+  <span id="status-info">Benchmarking...</span><br>
+  <span id="gpu-info-span"></span><br> <!-- GPU情報用 -->
+  <span id="drawcall-info-span"></span> <!-- ドローコール用 -->
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/stats.js/7/Stats.min.js"></script>
+<script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.175.0/build/three.webgpu.js"
+    }
+  }
+</script>
+<script type="module">
+  import * as THREE from "three";
+  import { setupSceneCameraStats, setupResizeHandler, runBenchmark } from './benchmark_utils.js';
+
+  // --- 共通セットアップ ---
+  const { scene, camera, stats } = setupSceneCameraStats();
+
+  // --- WebGPU 固有セットアップ ---
+  const renderer = new THREE.WebGPURenderer({antialias: true});
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setClearColor(0x000000); // 背景色を黒に設定
+  document.body.appendChild(renderer.domElement);
+
+  // GPU 情報ログ (WebGPU用)
+  (() => {
+    const gpuInfoElement = document.getElementById('gpu-info-span');
+    if (gpuInfoElement) {
+      gpuInfoElement.textContent = `Renderer: ${renderer.isWebGPURenderer ? 'WebGPU' : 'WebGL (fallback?)'}`;
+    }
+  })();
+
+  // リサイズハンドラ設定
+  setupResizeHandler(camera, renderer);
+
+  // --- ベンチマーク固有ロジック (InstancedMesh版) ---
+
+  let instancedMesh = null; // InstancedMesh を保持
+  let instanceData = []; // 各インスタンスの回転データなどを保持
+  const matrix = new THREE.Matrix4(); // 行列計算用 (再利用)
+  const position = new THREE.Vector3(); // 位置計算用 (再利用)
+  const quaternion = new THREE.Quaternion(); // 回転計算用 (再利用)
+  const scale = new THREE.Vector3(1, 1, 1); // スケール (固定)
+
+  /**
+   * 指定された数のインスタンスを持つ InstancedMesh を生成し、シーンに追加します。
+   * 既存の InstancedMesh は事前にシーンから削除されます。
+   * 各インスタンスの初期位置と回転データも生成・保存します。
+   * @param {number} n - 生成するインスタンスの数。
+   */
+   function createCubes(n) {
+    // 既存をクリア
+    if (instancedMesh) {
+      scene.remove(instancedMesh);
+      instancedMesh.geometry.dispose();
+      instancedMesh.material.dispose();
+      instancedMesh = null;
+    }
+    instanceData = []; // インスタンスデータもクリア
+
+    if (n === 0) return; // 0個の場合は何もしない
+
+    // ジオメトリ/マテリアルを再利用
+    const geom = new THREE.BoxGeometry(1, 1, 1);
+    const mat = new THREE.MeshNormalMaterial();
+
+    instancedMesh = new THREE.InstancedMesh(geom, mat, n);
+    instancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); // 更新頻度が高いことを指定
+
+    for (let i = 0; i < n; i++) {
+      // 初期位置
+      position.set(
+        (Math.random() - 0.5) * 100,
+        (Math.random() - 0.5) * 100,
+        (Math.random() - 0.5) * 100
+      );
+
+      // ランダムな初期回転 (Quaternion)
+      quaternion.setFromEuler(new THREE.Euler(
+        Math.random() * Math.PI * 2,
+        Math.random() * Math.PI * 2,
+        Math.random() * Math.PI * 2
+      ));
+
+      // インスタンスデータを保存
+      const data = {
+        position: position.clone(),
+        quaternion: quaternion.clone(),
+        // 各インスタンスの回転軸と速度
+        rotationAxis: new THREE.Vector3(Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1).normalize(),
+        rotationSpeed: Math.random() * 0.02 + 0.005,
+        // 計算用
+        _tempQuaternion: new THREE.Quaternion()
+      };
+      instanceData.push(data);
+
+      // 初期行列を設定
+      matrix.compose(data.position, data.quaternion, scale);
+      instancedMesh.setMatrixAt(i, matrix);
+    }
+
+    scene.add(instancedMesh);
+  }
+
+  /**
+   * 指定されたフレーム数をレンダリングし、その間の平均 FPS を測定して返します。
+   * レンダリング中には InstancedMesh の各インスタンスのアニメーションも実行されます。
+   * @param {number} n - FPS 測定のためにレンダリングするフレーム数。
+   * @returns {Promise<number>} 測定された平均 FPS を解決する Promise。
+   */
+   async function measureFPS(n) {
+    const drawCallElement = document.getElementById('drawcall-info-span');
+    return new Promise(resolve => {
+      if (!instancedMesh) { // インスタンスがない場合は 0 FPS とする (エラー回避)
+        resolve(0);
+        return;
+      }
+      let count = 0, t0 = 0, total = 0;
+
+      function step() {
+        if (count === 0) t0 = performance.now();
+
+        // インスタンス行列を更新
+        for (let i = 0; i < instancedMesh.count; i++) {
+          const data = instanceData[i];
+
+          // 現在の回転に、軸周りの回転を追加
+          data._tempQuaternion.setFromAxisAngle(data.rotationAxis, data.rotationSpeed);
+          data.quaternion.multiplyQuaternions(data._tempQuaternion, data.quaternion);
+
+          // 新しい行列を計算
+          matrix.compose(data.position, data.quaternion, scale);
+          instancedMesh.setMatrixAt(i, matrix);
+        }
+        instancedMesh.instanceMatrix.needsUpdate = true; // 更新を通知
+
+        renderer.render(scene, camera);
+
+        // ドローコール数を表示 (WebGPURenderer では drawCalls? 確認が必要)
+        if (drawCallElement) {
+          drawCallElement.textContent = `Draw Calls: ${renderer.info.render.drawCalls !== undefined ? renderer.info.render.drawCalls : 'N/A'}`;
+        }
+
+        stats.update(); // stats は共通セットアップで取得
+        const dt = performance.now() - (t0 + total);
+        total += dt;
+        count++;
+        if (count < n) {
+          requestAnimationFrame(step);
+        } else {
+          const avgFPS = 1000 / (total / n);
+          resolve(avgFPS);
+        }
+      }
+      step();
+    });
+  }
+
+  // --- ベンチマーク実行 ---
+  runBenchmark({
+    createCubesFn: createCubes,
+    measureFPSFn: measureFPS,
+    renderer: renderer,
+    resultLabel: "(WebGPU - Instanced)",
+    maxTest: 1000000 // このファイル固有の上限値
+  });
+</script>
+</body>
+</html>

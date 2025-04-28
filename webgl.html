@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>Three.js 自動ベンチマーク</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!-- 情報表示を一つの div にまとめる -->
+<div id="info">
+  <span id="status-info">Benchmarking...</span><br>
+  <span id="gpu-info-span"></span><br> <!-- GPU情報用 -->
+  <span id="drawcall-info-span"></span> <!-- ドローコール用 -->
+</div>
+<!-- <div id="gpu-info"></div> --> <!-- 削除 -->
+<!-- <div id="drawcall-info"></div> --> <!-- 削除 -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/stats.js/7/Stats.min.js"></script>
+<script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.175.0/build/three.module.js"
+    }
+  }
+</script>
+<script type="module">
+  import * as THREE from "three";
+  import { setupSceneCameraStats, setupResizeHandler, runBenchmark } from './benchmark_utils.js';
+
+  // --- 共通セットアップ ---
+  const { scene, camera, stats } = setupSceneCameraStats();
+
+  // --- WebGL 固有セットアップ ---
+  const renderer = new THREE.WebGLRenderer({antialias: true});
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  // GPU 情報ログ (WebGL用)
+  (() => {
+    const gl = renderer.getContext();
+    const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+    const gpuInfoElement = document.getElementById('gpu-info-span');
+    if (dbg && gpuInfoElement) {
+      gpuInfoElement.textContent =
+        `GPU: ${gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL)}, ` +
+        `${gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)}`;
+    } else if (gpuInfoElement) {
+      gpuInfoElement.textContent = 'GPU info not available';
+    }
+  })();
+
+  // リサイズハンドラ設定
+  setupResizeHandler(camera, renderer);
+
+  // --- ベンチマーク固有ロジック (個別メッシュ版) ---
+
+  /**
+   * 回転アニメーションを持つ単一のキューブを表すクラス。
+   */
+  class Cube {
+    /**
+     * Cube のインスタンスを作成します。
+     * ランダムな位置、回転軸、回転速度が設定されます。
+     * @param {THREE.BufferGeometry} geometry - キューブのジオメトリ。
+     * @param {THREE.Material} material - キューブのマテリアル。
+     */
+    constructor(geometry, material) {
+      this.mesh = new THREE.Mesh(geometry, material);
+      this.mesh.position.set(
+              (Math.random() - 0.5) * 100,
+              (Math.random() - 0.5) * 100,
+              (Math.random() - 0.5) * 100
+      );
+      this.rotationAxis = new THREE.Vector3(Math.random() * 2 - 1,
+                                         Math.random() * 2 - 1,
+                                         Math.random() * 2 - 1).normalize();
+      this.rotationSpeed = Math.random() * 0.02 + 0.005; // 0.005 ~ 0.025 の範囲
+    }
+
+    /**
+     * キューブを自身の回転軸周りに更新します。
+     * アニメーションループ内で呼び出されることを想定しています。
+     */
+    update() {
+      this.mesh.rotateOnAxis(this.rotationAxis, this.rotationSpeed);
+    }
+  }
+
+  let cubes = [];
+
+  /**
+   * 指定された数の Cube インスタンスを生成し、シーンに追加します。
+   * 既存のキューブは事前にシーンから削除されます。
+   * @param {number} n - 生成するキューブの数。
+   */
+  function createCubes(n) {
+    // 既存をクリア
+    cubes.forEach(cube => scene.remove(cube.mesh));
+    cubes = [];
+    // ジオメトリ/マテリアルを再利用
+    const geom = new THREE.BoxGeometry(1, 1, 1);
+    const mat = new THREE.MeshNormalMaterial();
+    for (let i = 0; i < n; i++) {
+      const cube = new Cube(geom, mat);
+      scene.add(cube.mesh);
+      cubes.push(cube);
+    }
+  }
+
+  /**
+   * 指定されたフレーム数をレンダリングし、その間の平均 FPS を測定して返します。
+   * レンダリング中にはキューブの回転アニメーションも実行されます。
+   * @param {number} n - FPS 測定のためにレンダリングするフレーム数。
+   * @returns {Promise<number>} 測定された平均 FPS を解決する Promise。
+   */
+  async function measureFPS(n) {
+    const drawCallElement = document.getElementById('drawcall-info-span');
+    return new Promise(resolve => {
+      let count = 0, t0 = 0, total = 0;
+
+      function step() {
+        if (count === 0) t0 = performance.now();
+
+        // キューブをそれぞれの軸と速度で回転させる
+        cubes.forEach(cube => {
+          cube.update();
+        });
+
+        renderer.render(scene, camera);
+
+        // ドローコール数を表示
+        if (drawCallElement) {
+          drawCallElement.textContent = `Draw Calls: ${renderer.info.render.calls}`;
+        }
+
+        stats.update(); // stats は共通セットアップで取得
+        const dt = performance.now() - (t0 + total);
+        total += dt;
+        count++;
+        if (count < n) {
+          requestAnimationFrame(step);
+        } else {
+          const avgFPS = 1000 / (total / n);
+          resolve(avgFPS);
+        }
+      }
+
+      step();
+    });
+  }
+
+  // --- ベンチマーク実行 ---
+  runBenchmark({
+    createCubesFn: createCubes,
+    measureFPSFn: measureFPS,
+    renderer: renderer,
+    resultLabel: "(WebGL - Mesh)",
+    maxTest: 100000 // このファイル固有の上限値
+  });
+</script>
+</body>
+</html>
